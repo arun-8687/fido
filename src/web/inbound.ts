@@ -219,6 +219,8 @@ export async function monitorWebInbox(options: {
         {
           from,
           to: selfE164 ?? "me",
+          sender: participantJid ? jidToE164(participantJid) : undefined,
+          senderName: msg.pushName,
           body,
           mediaPath,
           mediaType,
@@ -302,7 +304,8 @@ export async function monitorWebInbox(options: {
       mediaBuffer?: Buffer,
       mediaType?: string,
     ): Promise<{ messageId: string }> => {
-      const jid = `${to.replace(/^\+/, "")}@s.whatsapp.net`;
+      // Preserve group JIDs (@g.us) as-is; only convert phone numbers
+      const jid = to.includes("@") ? to : `${to.replace(/^\+/, "")}@s.whatsapp.net`;
       let payload: AnyMessageContent;
       if (mediaBuffer && mediaType) {
         if (mediaType.startsWith("image/")) {
@@ -342,7 +345,8 @@ export async function monitorWebInbox(options: {
      * Used after IPC send to show more messages are coming.
      */
     sendComposingTo: async (to: string): Promise<void> => {
-      const jid = `${to.replace(/^\+/, "")}@s.whatsapp.net`;
+      // Preserve group JIDs (@g.us) as-is; only convert phone numbers
+      const jid = to.includes("@") ? to : `${to.replace(/^\+/, "")}@s.whatsapp.net`;
       await sock.sendPresenceUpdate("composing", jid);
     },
   } as const;
@@ -394,15 +398,34 @@ export function extractText(
 ): string | undefined {
   const message = unwrapMessage(rawMessage);
   if (!message) return undefined;
+
+  // Extract the main message text
+  let text: string | undefined;
   if (typeof message.conversation === "string" && message.conversation.trim()) {
-    return message.conversation.trim();
+    text = message.conversation.trim();
   }
   const extended = message.extendedTextMessage?.text;
-  if (extended?.trim()) return extended.trim();
+  if (!text && extended?.trim()) text = extended.trim();
   const caption =
     message.imageMessage?.caption ?? message.videoMessage?.caption;
-  if (caption?.trim()) return caption.trim();
-  return undefined;
+  if (!text && caption?.trim()) text = caption.trim();
+
+  // Extract quoted message text if present
+  const quotedMessage = message.extendedTextMessage?.contextInfo?.quotedMessage;
+  if (quotedMessage) {
+    const quotedText =
+      quotedMessage.conversation?.trim() ||
+      quotedMessage.extendedTextMessage?.text?.trim() ||
+      quotedMessage.imageMessage?.caption?.trim() ||
+      quotedMessage.videoMessage?.caption?.trim();
+
+    if (quotedText) {
+      const prefix = `[Quoted: "${quotedText.slice(0, 200)}${quotedText.length > 200 ? '...' : ''}"]\n`;
+      text = text ? prefix + text : prefix;
+    }
+  }
+
+  return text;
 }
 
 export function extractMediaPlaceholder(
@@ -421,9 +444,11 @@ export function extractMediaPlaceholder(
 async function downloadInboundMedia(
   msg: proto.IWebMessageInfo,
   sock: Awaited<ReturnType<typeof createWaSocket>>,
-): Promise<{ buffer: Buffer; mimetype?: string } | undefined> {
+): Promise<{ buffer: Buffer; mimetype?: string; isQuoted?: boolean } | undefined> {
   const message = unwrapMessage(msg.message as proto.IMessage | undefined);
   if (!message) return undefined;
+
+  // Check for media in the main message first
   const mimetype =
     message.imageMessage?.mimetype ??
     message.videoMessage?.mimetype ??
@@ -431,16 +456,68 @@ async function downloadInboundMedia(
     message.audioMessage?.mimetype ??
     message.stickerMessage?.mimetype ??
     undefined;
-  if (
-    !message.imageMessage &&
-    !message.videoMessage &&
-    !message.documentMessage &&
-    !message.audioMessage &&
-    !message.stickerMessage
-  ) {
+
+  const hasDirectMedia =
+    message.imageMessage ||
+    message.videoMessage ||
+    message.documentMessage ||
+    message.audioMessage ||
+    message.stickerMessage;
+
+  // If no direct media, check for quoted message media
+  const quotedMessage = message.extendedTextMessage?.contextInfo?.quotedMessage;
+  const quotedMimetype =
+    quotedMessage?.imageMessage?.mimetype ??
+    quotedMessage?.videoMessage?.mimetype ??
+    quotedMessage?.documentMessage?.mimetype ??
+    quotedMessage?.audioMessage?.mimetype ??
+    quotedMessage?.stickerMessage?.mimetype ??
+    undefined;
+
+  const hasQuotedMedia = quotedMessage && (
+    quotedMessage.imageMessage ||
+    quotedMessage.videoMessage ||
+    quotedMessage.documentMessage ||
+    quotedMessage.audioMessage ||
+    quotedMessage.stickerMessage
+  );
+
+  if (!hasDirectMedia && !hasQuotedMedia) {
     return undefined;
   }
+
   try {
+    // For quoted media, we need to construct a synthetic WAMessage
+    if (!hasDirectMedia && hasQuotedMedia) {
+      // Download the quoted message media by creating a synthetic message object
+      const quotedStanzaId = message.extendedTextMessage?.contextInfo?.stanzaId;
+      const quotedParticipant = message.extendedTextMessage?.contextInfo?.participant;
+
+      if (quotedStanzaId) {
+        // Create a synthetic message structure for downloadMediaMessage
+        const syntheticMsg: WAMessage = {
+          key: {
+            remoteJid: msg.key?.remoteJid,
+            id: quotedStanzaId,
+            participant: quotedParticipant,
+          },
+          message: quotedMessage as proto.IMessage,
+        };
+
+        const buffer = (await downloadMediaMessage(
+          syntheticMsg,
+          "buffer",
+          {},
+          {
+            reuploadRequest: sock.updateMediaMessage,
+            logger: sock.logger,
+          },
+        )) as Buffer;
+        return { buffer, mimetype: quotedMimetype, isQuoted: true };
+      }
+    }
+
+    // Download direct media
     const buffer = (await downloadMediaMessage(
       msg as WAMessage,
       "buffer",

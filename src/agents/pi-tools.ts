@@ -19,6 +19,10 @@ type TextContentBlock = Extract<ToolContentBlock, { type: "text" }>;
 // all base64 image blocks above this limit while preserving aspect ratio.
 const MAX_IMAGE_DIMENSION_PX = 2000;
 
+// Maximum characters to keep from bash tool output to prevent token explosion.
+// Large grep/search outputs can return hundreds of KB, causing 100K+ token requests.
+const MAX_BASH_OUTPUT_CHARS = 5000;
+
 function sniffMimeFromBase64(base64: string): string | undefined {
   const trimmed = base64.trim();
   if (!trimmed) return undefined;
@@ -260,7 +264,21 @@ function createClawdisBashTool(base: AnyAgentTool): AnyAgentTool {
         params,
         signal,
       )) as AgentToolResult<unknown>;
-      return sanitizeToolResultImages(result, "bash");
+      // Sanitize images first
+      const sanitized = await sanitizeToolResultImages(result, "bash");
+      // Truncate text content to prevent token explosion from large grep/search outputs
+      const content = Array.isArray(sanitized.content) ? sanitized.content : [];
+      const truncatedContent = content.map((block) => {
+        if (isTextBlock(block) && block.text.length > MAX_BASH_OUTPUT_CHARS) {
+          return {
+            ...block,
+            text: block.text.slice(0, MAX_BASH_OUTPUT_CHARS) +
+              `\n\n[OUTPUT TRUNCATED - exceeded ${MAX_BASH_OUTPUT_CHARS} chars. Use head/tail/grep with limits to narrow results.]`,
+          };
+        }
+        return block;
+      });
+      return { ...sanitized, content: truncatedContent };
     },
   };
 }

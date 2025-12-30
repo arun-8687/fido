@@ -1,7 +1,7 @@
 #!/usr/bin/env node
 import process from "node:process";
 import { fileURLToPath } from "node:url";
-
+import path from "node:path";
 import dotenv from "dotenv";
 import { getReplyFromConfig } from "./auto-reply/reply.js";
 import { applyTemplate } from "./auto-reply/templating.js";
@@ -66,8 +66,15 @@ export {
   waitForever,
 };
 
+const currentFile = fileURLToPath(import.meta.url);
+const executedFile = process.argv[1];
+
 const isMain =
-  process.argv[1] && fileURLToPath(import.meta.url) === process.argv[1];
+  executedFile === currentFile ||
+  (executedFile &&
+    currentFile &&
+    path.basename(executedFile) === path.basename(currentFile)) ||
+  !!process.env.pm_id; // Explicitly allow if running under PM2
 
 if (isMain) {
   // Global error handlers to prevent silent crashes from unhandled rejections/exceptions.

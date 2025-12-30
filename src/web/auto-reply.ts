@@ -106,6 +106,7 @@ function buildMentionConfig(cfg: ReturnType<typeof loadConfig>): MentionConfig {
 function isBotMentioned(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  allowFrom?: string[],
 ): boolean {
   const clean = (text: string) =>
     text
@@ -113,22 +114,35 @@ function isBotMentioned(
       .replace(/[\u200b-\u200f\u202a-\u202e\u2060-\u206f]/g, "")
       .toLowerCase();
 
+  const isSelfChatMode =
+    msg.selfE164 &&
+    allowFrom?.some((n) => normalizeE164(n) === msg.selfE164);
+
   if (msg.mentionedJids?.length) {
-    const normalizedMentions = msg.mentionedJids
-      .map((jid) => jidToE164(jid) ?? jid)
-      .filter(Boolean);
-    if (msg.selfE164 && normalizedMentions.includes(msg.selfE164)) return true;
-    if (msg.selfJid && msg.selfE164) {
-      // Some mentions use the bare JID; match on E.164 to be safe.
-      const bareSelf = msg.selfJid.replace(/:\\d+/, "");
-      if (normalizedMentions.includes(bareSelf)) return true;
+    // In self-chat mode, selfE164 IS the user, so mentions of selfE164 are just mentions of the user.
+    // We skip JID-based detection in this case to avoid triggering on every user mention.
+    if (!isSelfChatMode) {
+      const normalizedMentions = msg.mentionedJids
+        .map((jid) => jidToE164(jid) ?? jid)
+        .filter(Boolean);
+      if (msg.selfE164 && normalizedMentions.includes(msg.selfE164))
+        return true;
+      if (msg.selfJid && msg.selfE164) {
+        // Some mentions use the bare JID; match on E.164 to be safe.
+        const bareSelf = msg.selfJid.replace(/:\d+/, "");
+        if (normalizedMentions.includes(bareSelf)) return true;
+      }
     }
   }
-  const bodyClean = clean(msg.body);
+  // Strip quoted message prefix to only check the actual reply text, not quoted content
+  // Quoted messages appear like: [Quoted: "...quoted text..."]\nActual reply
+  const bodyWithoutQuote = msg.body.replace(/^\[Quoted:.*?\]\n?/is, "");
+  const bodyClean = clean(bodyWithoutQuote);
   if (mentionCfg.mentionRegexes.some((re) => re.test(bodyClean))) return true;
 
   // Fallback: detect body containing our own number (with or without +, spacing)
-  if (msg.selfE164) {
+  // Skip this in self-chat mode too, as it would match the user's number in text.
+  if (msg.selfE164 && !isSelfChatMode) {
     const selfDigits = msg.selfE164.replace(/\D/g, "");
     if (selfDigits) {
       const bodyDigits = bodyClean.replace(/[^\d]/g, "");
@@ -145,8 +159,9 @@ function isBotMentioned(
 function debugMention(
   msg: WebInboundMsg,
   mentionCfg: MentionConfig,
+  allowFrom?: string[],
 ): { wasMentioned: boolean; details: Record<string, unknown> } {
-  const result = isBotMentioned(msg, mentionCfg);
+  const result = isBotMentioned(msg, mentionCfg, allowFrom);
   const details = {
     from: msg.from,
     body: msg.body,
@@ -172,15 +187,32 @@ export function resolveReplyHeartbeatMinutes(
 
 export function stripHeartbeatToken(raw?: string) {
   if (!raw) return { shouldSkip: true, text: "" };
-  const trimmed = raw.trim();
-  if (!trimmed) return { shouldSkip: true, text: "" };
-  if (trimmed === HEARTBEAT_TOKEN) return { shouldSkip: true, text: "" };
-  const withoutToken = trimmed.replaceAll(HEARTBEAT_TOKEN, "").trim();
+
+  // Remove all occurrences of the token (case-insensitive for safety)
+  let processed = raw.replace(new RegExp(HEARTBEAT_TOKEN, "gi"), "");
+
+  // Clean up artifacts: trailing _OK repetitions from LLM hallucinations
+  // e.g. "HEARTBEAT_OK_OK_OK" -> "_OK_OK" -> ""
+  // Also handles "_OK _OK" patterns
+  processed = processed.replace(/(\s*_?OK)+$/gi, "");
+
+  // Replace remaining underscores with spaces
+  processed = processed.replace(/_/g, " ");
+
+  // Collapse whitespace
+  processed = processed.trim().replace(/\s+/g, " ");
+
+  // Remove standalone "OK" if that's all that is left (case-insensitive)
+  if (/^ok$/i.test(processed)) {
+    return { shouldSkip: true, text: "" };
+  }
+
   return {
-    shouldSkip: withoutToken.length === 0,
-    text: withoutToken || trimmed,
+    shouldSkip: processed.length === 0,
+    text: processed,
   };
 }
+
 
 export async function runWebHeartbeatOnce(opts: {
   cfg?: ReturnType<typeof loadConfig>;
@@ -489,6 +521,44 @@ function getSessionSnapshot(
   return { key, entry, fresh, idleMinutes };
 }
 
+// Detect if text looks like an error or technical message that should be routed to admin
+function isLlmError(text?: string): boolean {
+  if (!text) return false;
+  const errorPatterns = [
+    // LLM API errors
+    /429/i,
+    /quota/i,
+    /rate\s*limit/i,
+    /resource\s*exhausted/i,
+    /llm\s*request\s*(failed|rejected)/i,
+    /api\s*(key|error)/i,
+    /exceeded\s*your\s*current/i,
+    /too\s*many\s*requests/i,
+    /invalid_request_error/i,
+    /billing/i,
+    // Generic errors
+    /error\s*occur+ed/i,
+    /unknown\s*error/i,
+    /an\s*error\s*(has\s*)?occur+ed/i,
+    /something\s*went\s*wrong/i,
+    /internal\s*error/i,
+    /unexpected\s*error/i,
+    // Tool execution errors (like startcall:default_api:bash...)
+    /startcall:/i,
+    /endcall:/i,
+    /default_api:/i,
+    /<ctrl\d+>/i,
+    /bash\{command:/i,
+    // Stack traces and technical output
+    /^\s*at\s+\w+.*:\d+:\d+/m, // Stack trace lines
+    /Error:\s*\w+/,
+    /ENOENT|EACCES|ECONNREFUSED/i,
+    /traceback/i,
+  ];
+  return errorPatterns.some((pattern) => pattern.test(text));
+}
+
+
 async function deliverWebReply(params: {
   replyResult: ReplyPayload;
   msg: WebInboundMsg;
@@ -497,6 +567,7 @@ async function deliverWebReply(params: {
   runtime: RuntimeEnv;
   connectionId?: string;
   skipLog?: boolean;
+  errorAlertTo?: string; // E.164 number for error routing
 }) {
   const {
     replyResult,
@@ -506,9 +577,44 @@ async function deliverWebReply(params: {
     runtime,
     connectionId,
     skipLog,
+    errorAlertTo,
   } = params;
   const replyStarted = Date.now();
-  const textChunks = chunkText(replyResult.text || "", WEB_TEXT_LIMIT);
+
+  // Detect if this is a group chat and the reply contains an LLM error
+  const isGroup = msg.chatType === "group";
+  const hasError = isLlmError(replyResult.text);
+
+  // If group chat with error and errorAlertTo is set, route error to DM
+  if (isGroup && hasError && errorAlertTo) {
+    const gracefulMsg = "Chinna hiccup ayyindi naa lo, oka nimisham aagu! 🐶";
+    const errorDetail = `⚠️ Error in group ${msg.conversationId ?? msg.from}:\n\n${replyResult.text}`;
+
+    // Send graceful message to group
+    await msg.reply(gracefulMsg);
+
+    // Send technical error to admin DM
+    try {
+      await sendMessageWhatsApp(errorAlertTo, errorDetail, { verbose: false });
+      replyLogger.info(
+        { to: errorAlertTo, group: msg.from, errorPreview: replyResult.text?.slice(0, 100) },
+        "routed LLM error to admin DM",
+      );
+    } catch (dmErr) {
+      replyLogger.warn({ err: String(dmErr), to: errorAlertTo }, "failed to send error to admin DM");
+    }
+    return;
+  }
+
+  // Clean markdown for WhatsApp before chunking
+  const cleanBody = (replyResult.text || "")
+    .replace(/\*\*(.*?)\*\*/g, "*$1*") // Convert **bold** to *bold*
+    .replace(/^#+\s*(.*)$/gm, "*$1*") // Convert # Header to *Header*
+    .replace(/\[([^\]]+)\]\(([^)]+)\)/g, "$1 ($2)") // Convert [Link](url) to Link (url)
+    .replace(/[\s]*(🟢|🔴|⚠️|📍)[\s]*$/g, ""); // Strip trailing status emojis (prevent LLM habit)
+
+  const textChunks = chunkText(cleanBody, WEB_TEXT_LIMIT);
+
   const mediaList = replyResult.mediaUrls?.length
     ? replyResult.mediaUrls
     : replyResult.mediaUrl
@@ -954,6 +1060,7 @@ export async function monitorWebProvider(
             replyLogger,
             runtime,
             connectionId,
+            errorAlertTo: cfg.inbound?.groupChat?.errorAlertTo,
           });
 
           if (replyPayload.text) {
@@ -1020,7 +1127,15 @@ export async function monitorWebProvider(
           logVerbose(`📱 Same-phone mode detected (from === to: ${msg.from})`);
         }
 
-        // Skip if this is a message we just sent (echo detection)
+        // Skip if this is a message we sent ourselves (self-echo in groups)
+        if (msg.selfE164 && msg.senderE164 && msg.senderE164 === msg.selfE164) {
+          logVerbose(
+            `⏭️  Skipping self-sent message in ${msg.chatType} (sender ${msg.senderE164} === self ${msg.selfE164})`,
+          );
+          return;
+        }
+
+        // Skip if this is a message we just sent (text echo detection)
         if (recentlySent.has(msg.body)) {
           console.log(`⏭️  Skipping echo: detected recently sent message`);
           logVerbose(
@@ -1042,7 +1157,11 @@ export async function monitorWebProvider(
           while (history.length > groupHistoryLimit) history.shift();
           groupHistories.set(conversationId, history);
 
-          const mentionDebug = debugMention(msg, mentionConfig);
+          const mentionDebug = debugMention(
+            msg,
+            mentionConfig,
+            cfg.inbound?.allowFrom,
+          );
           replyLogger.debug(
             {
               conversationId,

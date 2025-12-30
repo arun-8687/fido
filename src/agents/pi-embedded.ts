@@ -12,7 +12,7 @@ import {
   type AgentToolResult,
   type Api,
   type AssistantMessage,
-  getApiKey,
+  getEnvApiKey,
   getModels,
   getProviders,
   type KnownProvider,
@@ -81,6 +81,60 @@ function mapThinkingLevel(level?: ThinkLevel): ThinkingLevel {
   return level;
 }
 
+// Maximum context tokens to send to the LLM (prevents cost explosion in long chats)
+const MAX_CONTEXT_TOKENS = 50_000;
+
+/**
+ * Rough token estimate: ~4 chars per token for English text.
+ * This is a fast heuristic; actual tokenization varies by model.
+ */
+function estimateMessageTokens(messages: AppMessage[]): number {
+  let chars = 0;
+  for (const msg of messages) {
+    const content = (msg as { content?: unknown })?.content;
+    if (typeof content === "string") {
+      chars += content.length;
+    } else if (Array.isArray(content)) {
+      for (const block of content) {
+        if (typeof block === "string") chars += block.length;
+        else if (block && typeof block === "object" && "text" in block) {
+          chars += String((block as { text?: unknown }).text ?? "").length;
+        }
+      }
+    }
+  }
+  return Math.ceil(chars / 4);
+}
+
+/**
+ * Trim messages from the beginning to stay within a token budget.
+ * Always keeps at least the last 2 messages (user + assistant pair).
+ */
+function trimMessagesByTokens(
+  messages: AppMessage[],
+  maxTokens: number,
+): AppMessage[] {
+  if (messages.length === 0) return messages;
+
+  // Always keep at least the last message pair
+  const minKeep = Math.min(2, messages.length);
+
+  // Start from the end, accumulate tokens until we hit the limit
+  let tokenCount = 0;
+  let startIdx = messages.length;
+
+  for (let i = messages.length - 1; i >= 0; i--) {
+    const msgTokens = estimateMessageTokens([messages[i]]);
+    if (tokenCount + msgTokens > maxTokens && i < messages.length - minKeep) {
+      break;
+    }
+    tokenCount += msgTokens;
+    startIdx = i;
+  }
+
+  return messages.slice(startIdx);
+}
+
 function isKnownProvider(provider: string): provider is KnownProvider {
   return getProviders().includes(provider as KnownProvider);
 }
@@ -132,7 +186,7 @@ async function getApiKeyForProvider(
     const oauthEnv = process.env.ANTHROPIC_OAUTH_TOKEN;
     if (oauthEnv?.trim()) return oauthEnv.trim();
   }
-  return getApiKey(provider) ?? undefined;
+  return getEnvApiKey(provider as KnownProvider) ?? undefined;
 }
 
 type ContentBlock = AgentToolResult<unknown>["content"][number];
@@ -294,8 +348,17 @@ export async function runEmbeddedPiAgent(params: {
         priorRaw,
         "session:history",
       );
-      if (prior.length > 0) {
-        agent.replaceMessages(prior);
+
+      // Trim to stay within token budget (prevents cost explosion in long chats)
+      const trimmed = trimMessagesByTokens(prior, MAX_CONTEXT_TOKENS);
+      if (trimmed.length < prior.length) {
+        console.log(
+          `[context] Trimmed ${prior.length - trimmed.length} old messages (${prior.length} → ${trimmed.length}, ~${estimateMessageTokens(trimmed)} tokens)`,
+        );
+      }
+
+      if (trimmed.length > 0) {
+        agent.replaceMessages(trimmed);
       }
 
       const session = new AgentSession({
@@ -322,7 +385,7 @@ export async function runEmbeddedPiAgent(params: {
       let aborted = Boolean(params.abortSignal?.aborted);
 
       const unsubscribe = session.subscribe(
-        (evt: AgentEvent | { type: string; [k: string]: unknown }) => {
+        (evt: AgentEvent | { type: string;[k: string]: unknown }) => {
           if (evt.type === "tool_execution_start") {
             const toolName = String(
               (evt as AgentEvent & { toolName: string }).toolName,
@@ -517,12 +580,12 @@ export async function runEmbeddedPiAgent(params: {
         model: lastAssistant?.model ?? model.id,
         usage: usage
           ? {
-              input: usage.input,
-              output: usage.output,
-              cacheRead: usage.cacheRead,
-              cacheWrite: usage.cacheWrite,
-              total: usage.totalTokens,
-            }
+            input: usage.input,
+            output: usage.output,
+            cacheRead: usage.cacheRead,
+            cacheWrite: usage.cacheWrite,
+            total: usage.totalTokens,
+          }
           : undefined,
       };
 

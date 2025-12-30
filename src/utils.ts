@@ -32,6 +32,10 @@ export function normalizeE164(number: string): string {
 }
 
 export function toWhatsappJid(number: string): string {
+  // Preserve group JIDs (@g.us) or any existing JID format
+  if (number.includes("@")) {
+    return number;
+  }
   const e164 = normalizeE164(number);
   const digits = e164.replace(/\D/g, "");
   return `${digits}@s.whatsapp.net`;

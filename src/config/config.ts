@@ -68,6 +68,8 @@ export type GroupChatConfig = {
   requireMention?: boolean;
   mentionPatterns?: string[];
   historyLimit?: number;
+  /** E.164 number to receive technical error alerts (e.g., LLM quota errors) instead of showing them in group. */
+  errorAlertTo?: string;
 };
 
 export type BridgeBindMode = "auto" | "lan" | "tailnet" | "loopback";
@@ -217,6 +219,7 @@ const ClawdisSchema = z.object({
           requireMention: z.boolean().optional(),
           mentionPatterns: z.array(z.string()).optional(),
           historyLimit: z.number().int().positive().optional(),
+          errorAlertTo: z.string().optional(),
         })
         .optional(),
       transcribeAudio: z

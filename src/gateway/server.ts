@@ -15,6 +15,10 @@ import {
   normalizeVerboseLevel,
 } from "../auto-reply/thinking.js";
 import {
+  startBrowserControlServerFromConfig,
+  stopBrowserControlServer,
+} from "../browser/server.js";
+import {
   type CanvasHostServer,
   startCanvasHost,
 } from "../canvas-host/server.js";
@@ -95,23 +99,6 @@ import { sendMessageWhatsApp } from "../web/outbound.js";
 import { requestReplyHeartbeatNow } from "../web/reply-heartbeat-wake.js";
 import { buildMessageWithAttachments } from "./chat-attachments.js";
 import { handleControlUiHttpRequest } from "./control-ui.js";
-
-let stopBrowserControlServerIfStarted: (() => Promise<void>) | null = null;
-
-async function startBrowserControlServerIfEnabled(): Promise<void> {
-  if (process.env.CLAWDIS_SKIP_BROWSER_CONTROL_SERVER === "1") return;
-  // Lazy import to keep optional heavyweight deps (playwright/electron) out of
-  // embedded/daemon builds.
-  const spec =
-    process.env.CLAWDIS_BROWSER_CONTROL_MODULE ??
-    // Intentionally not a static string literal so bun bundling can omit it.
-    // (The embedded gateway sets CLAWDIS_SKIP_BROWSER_CONTROL_SERVER=1.)
-    ["..", "browser", "server.js"].join("/");
-  const mod = await import(spec);
-  stopBrowserControlServerIfStarted = mod.stopBrowserControlServer;
-  await mod.startBrowserControlServerFromConfig(defaultRuntime);
-}
-
 import {
   type ConnectParams,
   ErrorCodes,
@@ -861,6 +848,12 @@ export async function startGatewayServer(
     if (String(req.headers.upgrade ?? "").toLowerCase() === "websocket") return;
 
     if (controlUiEnabled) {
+      if (req.url === "/") {
+        res.statusCode = 302;
+        res.setHeader("Location", "/ui/");
+        res.end();
+        return;
+      }
       if (handleControlUiHttpRequest(req, res)) return;
     }
 
@@ -4053,7 +4046,7 @@ export async function startGatewayServer(
   defaultRuntime.log(`gateway log file: ${getResolvedLoggerSettings().file}`);
 
   // Start clawd browser control server (unless disabled via config).
-  void startBrowserControlServerIfEnabled().catch((err) => {
+  void startBrowserControlServerFromConfig(defaultRuntime).catch((err) => {
     logError(`gateway: clawd browser server failed to start: ${String(err)}`);
   });
 
@@ -4123,9 +4116,7 @@ export async function startGatewayServer(
         }
       }
       clients.clear();
-      if (stopBrowserControlServerIfStarted) {
-        await stopBrowserControlServerIfStarted().catch(() => {});
-      }
+      await stopBrowserControlServer().catch(() => {});
       await Promise.allSettled(providerTasks);
       await new Promise<void>((resolve) => wss.close(() => resolve()));
       await new Promise<void>((resolve, reject) =>

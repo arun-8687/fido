@@ -317,9 +317,20 @@ export async function getReplyFromConfig(
     typeof ctx.From === "string" &&
     (ctx.From.includes("@g.us") || ctx.From.startsWith("group:"));
 
+  /* Deep Research Mode trigger */
+  const deepResearchKeywords = [
+    "deep research",
+    "comprehensive report",
+    "exhaustive analysis",
+  ];
+  const isDeepResearch = deepResearchKeywords.some((kw) =>
+    triggerBodyNormalized.includes(kw),
+  );
+
   let resolvedThinkLevel =
     inlineThink ??
     (sessionEntry?.thinkingLevel as ThinkLevel | undefined) ??
+    (isDeepResearch ? "high" : undefined) ??
     (agentCfg?.thinkingDefault as ThinkLevel | undefined);
 
   const resolvedVerboseLevel =
@@ -562,21 +573,21 @@ export async function getReplyFromConfig(
   const groupIntro =
     isFirstTurnInSession && sessionCtx.ChatType === "group"
       ? (() => {
-          const subject = sessionCtx.GroupSubject?.trim();
-          const members = sessionCtx.GroupMembers?.trim();
-          const subjectLine = subject
-            ? `You are replying inside the WhatsApp group "${subject}".`
-            : "You are replying inside a WhatsApp group chat.";
-          const membersLine = members
-            ? `Group members: ${members}.`
-            : undefined;
-          return [subjectLine, membersLine]
-            .filter(Boolean)
-            .join(" ")
-            .concat(
-              " Address the specific sender noted in the message context.",
-            );
-        })()
+        const subject = sessionCtx.GroupSubject?.trim();
+        const members = sessionCtx.GroupMembers?.trim();
+        const subjectLine = subject
+          ? `You are replying inside the WhatsApp group "${subject}".`
+          : "You are replying inside a WhatsApp group chat.";
+        const membersLine = members
+          ? `Group members: ${members}.`
+          : undefined;
+        return [subjectLine, membersLine]
+          .filter(Boolean)
+          .join(" ")
+          .concat(
+            " Address the specific sender noted in the message context.",
+          );
+      })()
       : "";
   const baseBody = sessionCtx.BodyStripped ?? sessionCtx.Body ?? "";
   const baseBodyTrimmed = baseBody.trim();
@@ -656,9 +667,9 @@ export async function getReplyFromConfig(
   if (isFirstTurnInSession && sessionStore && sessionKey) {
     const current = sessionEntry ??
       sessionStore[sessionKey] ?? {
-        sessionId: sessionId ?? crypto.randomUUID(),
-        updatedAt: Date.now(),
-      };
+      sessionId: sessionId ?? crypto.randomUUID(),
+      updatedAt: Date.now(),
+    };
     sessionEntry = {
       ...current,
       sessionId: sessionId ?? current.sessionId ?? crypto.randomUUID(),
@@ -672,8 +683,8 @@ export async function getReplyFromConfig(
 
   const prefixedBody = transcribedText
     ? [prefixedBodyBase, `Transcript:\n${transcribedText}`]
-        .filter(Boolean)
-        .join("\n\n")
+      .filter(Boolean)
+      .join("\n\n")
     : prefixedBodyBase;
   const mediaNote = ctx.MediaPath?.length
     ? `[media attached: ${ctx.MediaPath}${ctx.MediaType ? ` (${ctx.MediaType})` : ""}${ctx.MediaUrl ? ` | ${ctx.MediaUrl}` : ""}]`
@@ -683,9 +694,9 @@ export async function getReplyFromConfig(
     : undefined;
   let commandBody = mediaNote
     ? [mediaNote, mediaReplyHint, prefixedBody ?? ""]
-        .filter(Boolean)
-        .join("\n")
-        .trim()
+      .filter(Boolean)
+      .join("\n")
+      .trim()
     : prefixedBody;
 
   // Fallback: if a stray leading level token remains, consume it
@@ -718,10 +729,10 @@ export async function getReplyFromConfig(
       runId,
       onPartialReply: opts?.onPartialReply
         ? (payload) =>
-            opts.onPartialReply?.({
-              text: payload.text,
-              mediaUrls: payload.mediaUrls,
-            })
+          opts.onPartialReply?.({
+            text: payload.text,
+            mediaUrls: payload.mediaUrls,
+          })
         : undefined,
     });
 

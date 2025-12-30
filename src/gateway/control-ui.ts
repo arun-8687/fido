@@ -3,8 +3,7 @@ import type { IncomingMessage, ServerResponse } from "node:http";
 import path from "node:path";
 import { fileURLToPath } from "node:url";
 
-const _UI_PREFIX = "/ui/";
-const ROOT_PREFIX = "/";
+const UI_PREFIX = "/ui/";
 
 function resolveControlUiRoot(): string | null {
   const here = path.dirname(fileURLToPath(import.meta.url));
@@ -87,10 +86,14 @@ export function handleControlUiHttpRequest(
 
   const url = new URL(urlRaw, "http://localhost");
 
-  if (url.pathname === "/ui" || url.pathname.startsWith("/ui/")) {
-    respondNotFound(res);
+  if (url.pathname === "/ui") {
+    res.statusCode = 302;
+    res.setHeader("Location", UI_PREFIX);
+    res.end();
     return true;
   }
+
+  if (!url.pathname.startsWith(UI_PREFIX)) return false;
 
   const root = resolveControlUiRoot();
   if (!root) {
@@ -102,11 +105,7 @@ export function handleControlUiHttpRequest(
     return true;
   }
 
-  const rel = (() => {
-    if (url.pathname === ROOT_PREFIX) return "";
-    if (url.pathname.startsWith("/assets/")) return url.pathname.slice(1);
-    return url.pathname.slice(1);
-  })();
+  const rel = url.pathname.slice(UI_PREFIX.length);
   const requested = rel && !rel.endsWith("/") ? rel : `${rel}index.html`;
   const fileRel = requested || "index.html";
   if (!isSafeRelativePath(fileRel)) {

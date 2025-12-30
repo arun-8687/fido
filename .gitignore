@@ -38,3 +38,10 @@ apps/ios/*.dSYM.zip
 
 # provisioning profiles (local)
 apps/ios/*.mobileprovision
+
+# Sensitive files
+*.pem
+*.key
+*.env
+.clawdis/
+

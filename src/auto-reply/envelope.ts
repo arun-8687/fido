@@ -12,7 +12,8 @@ function formatTimestamp(ts?: number | Date): string | undefined {
   const date = ts instanceof Date ? ts : new Date(ts);
   if (Number.isNaN(date.getTime())) return undefined;
   // Compact ISO-like format with minutes precision.
-  return date.toISOString().slice(0, 16).replace("T", " ");
+  const pad = (n: number) => n.toString().padStart(2, '0');
+  return `${date.getFullYear()}-${pad(date.getMonth() + 1)}-${pad(date.getDate())} ${pad(date.getHours())}:${pad(date.getMinutes())}`;
 }
 
 export function formatAgentEnvelope(params: AgentEnvelopeParams): string {

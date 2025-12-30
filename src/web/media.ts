@@ -1,5 +1,6 @@
 import fs from "node:fs/promises";
 import path from "node:path";
+import sharp from "sharp";
 
 import { isVerbose, logVerbose } from "../globals.js";
 import {
@@ -7,7 +8,6 @@ import {
   maxBytesForKind,
   mediaKindFromMime,
 } from "../media/constants.js";
-import { resizeToJpeg } from "../media/image-ops.js";
 import { detectMime } from "../media/mime.js";
 
 export async function loadWebMedia(
@@ -130,12 +130,15 @@ export async function optimizeImageToJpeg(
 
   for (const side of sides) {
     for (const quality of qualities) {
-      const out = await resizeToJpeg({
-        buffer,
-        maxSide: side,
-        quality,
-        withoutEnlargement: true,
-      });
+      const out = await sharp(buffer)
+        .resize({
+          width: side,
+          height: side,
+          fit: "inside",
+          withoutEnlargement: true,
+        })
+        .jpeg({ quality, mozjpeg: true })
+        .toBuffer();
       const size = out.length;
       if (!smallest || size < smallest.size) {
         smallest = { buffer: out, size, resizeSide: side, quality };
